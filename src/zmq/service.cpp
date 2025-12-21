@@ -119,17 +119,13 @@ void Service::impl::stopService() {
 }
 
 void Service::impl::cleanResources() {
-  if (engine_.pub != nullptr) {
-    zmq_close(engine_.pub);
-  }
+  zmq_ctx_shutdown(engine_.ctx);
 
-  if (engine_.sub != nullptr) {
-    zmq_close(engine_.pub);
-  }
+  zmq_close(engine_.sub);
 
-  if (engine_.ctx != nullptr) {
-    zmq_ctx_destroy(engine_.ctx);
-  }
+  zmq_close(engine_.pub);
+
+  zmq_ctx_destroy(engine_.ctx);
 
   stopService();
 }

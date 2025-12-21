@@ -60,17 +60,13 @@ Client::impl::impl(std::string host) : host_{std::move(host)} {
 }
 
 void Client::impl::cleanResources() {
-  if (engine_.pub != nullptr) {
-    zmq_close(engine_.pub);
-  }
+  zmq_ctx_shutdown(engine_.ctx);
 
-  if (engine_.sub != nullptr) {
-    zmq_close(engine_.pub);
-  }
+  zmq_close(engine_.pub);
 
-  if (engine_.ctx != nullptr) {
-    zmq_ctx_destroy(engine_.ctx);
-  }
+  zmq_close(engine_.sub);
+
+  zmq_ctx_destroy(engine_.ctx);
 }
 
 bool Client::impl::sendCommand(std::string_view service,
@@ -195,7 +191,12 @@ bool Client::impl::recvAndLogResponses() {
 
         std::string_view payload{buf.data(), static_cast<std::size_t>(res)};
 
-        std::cout << "Discovered: " << payload << std::endl;
+        try {
+          json j = json::parse(payload);
+          std::cout << "Discovered: " << j.dump(1) << std::endl;
+        } catch (const std::exception&) {
+          std::cout << "Discovered: " << payload << std::endl;
+        }
       }
     }
   }
