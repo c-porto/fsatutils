@@ -1,13 +1,14 @@
 #include <zmq.h>
 
 #include <array>
-#include <iostream>
-#include <memory>
-#include <nlohmann/json.hpp>
 #include <fsatutils/errors.hpp>
 #include <fsatutils/log/log.hpp>
 #include <fsatutils/zmq/client.hpp>
 #include <fsatutils/zmq/zprotocol.hpp>
+#include <iostream>
+#include <memory>
+#include <nlohmann/json.hpp>
+#include <thread>
 
 using json = nlohmann::json;
 
@@ -201,6 +202,8 @@ bool Client::impl::recvAndLogResponses() {
 }
 
 bool Client::impl::connectToEngineProxy() {
+  using namespace std::chrono_literals;
+
   engine_.ctx = zmq_ctx_new();
 
   if (engine_.ctx == nullptr) {
@@ -235,6 +238,9 @@ bool Client::impl::connectToEngineProxy() {
     return false;
   }
 
+  /* Make sure subscribers can be registered */
+  std::this_thread::sleep_for(100ms);
+
   const char* xpub = "tcp://0.0.0.0:2809";
 
   if (zmq_connect(engine_.sub, xpub) != 0) {
@@ -247,7 +253,16 @@ bool Client::impl::connectToEngineProxy() {
 
   /* Subscribe to everything */
   if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, "", 0U) != 0) {
-    logs::log(ERR, "Failed to subscribe to service name!\n");
+    logs::log(ERR, "Failed to subscribe to every message!\n");
+    zmq_close(engine_.sub);
+    zmq_close(engine_.pub);
+    zmq_ctx_destroy(engine_.ctx);
+    return false;
+  }
+
+  /* Unsubscribe to everything */
+  if (zmq_setsockopt(engine_.sub, ZMQ_UNSUBSCRIBE, "disc", 4U) != 0) {
+    logs::log(ERR, "Failed to unsubscribe to discover message!\n");
     zmq_close(engine_.sub);
     zmq_close(engine_.pub);
     zmq_ctx_destroy(engine_.ctx);
@@ -256,7 +271,7 @@ bool Client::impl::connectToEngineProxy() {
 
   logs::log(DEBUG,
             "Connected to ZMQ Engine: pub(tx): [%u], sub(rx): [%u], rx "
-            "filters: (none)\n",
+            "filters: \"\", !\"disc\"\n",
             ZMQ_FLATSAT_ENGINE_XSUB_PORT, ZMQ_FLATSAT_ENGINE_XPUB_PORT);
 
   return true;
