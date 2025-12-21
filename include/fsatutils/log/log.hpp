@@ -1,0 +1,58 @@
+#ifndef LOG_HPP_
+#define LOG_HPP_
+
+#include <cstdarg>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+
+enum LogLevel {
+  NONE = -1,
+  LOG = 0,
+  DEBUG,
+  INFO,
+  WARN,
+  ERR,
+};
+
+namespace logs {
+constexpr inline const char* LOG_DIR = "/var/log/fsat/";
+inline std::string logFile;
+inline bool disableJournal = false;
+inline bool disableFileLogs = false;
+inline bool coloredLogs = true;
+inline std::recursive_mutex logMutex;
+inline LogLevel global_log_level = DEBUG;
+
+void init(std::string logDir);
+void log(const LogLevel level, std::string str);
+
+inline void log(const LogLevel level, const char* fmt, ...) {
+  std::lock_guard<std::recursive_mutex> guard{logMutex};
+  std::string logMsg = "";
+  char* allocFmt;
+  va_list args;
+
+  if (level < global_log_level)
+      return;
+
+  va_start(args, fmt);
+
+  if (vasprintf(&allocFmt, fmt, args) < 0) {
+    log(ERR, "Failed to allocated log string!!");
+    va_end(args);
+    return;
+  }
+
+  va_end(args);
+
+  logMsg += allocFmt;
+
+  free(allocFmt);
+
+  log(level, logMsg);
+}
+
+}  // namespace logs
+
+#endif
