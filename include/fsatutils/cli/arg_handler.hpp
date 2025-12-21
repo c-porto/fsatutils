@@ -56,7 +56,7 @@ class ArgpHandler {
           data(data) {
       sub_argp.parser = parser;
       sub_argp.doc = doc.c_str();
-      sub_argp.args_doc = nullptr;
+      sub_argp.args_doc = (args_doc.empty()) ? nullptr : args_doc.c_str();
       sub_argp.argp_domain = nullptr;
     }
   };
