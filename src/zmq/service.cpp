@@ -3,16 +3,16 @@
 #include <array>
 #include <cassert>
 #include <cstring>
+#include <fsatutils/errors.hpp>
+#include <fsatutils/log/log.hpp>
+#include <fsatutils/zmq/service.hpp>
+#include <fsatutils/zmq/zprotocol.hpp>
 #include <fstream>
 #include <optional>
 #include <span>
 #include <string>
 #include <thread>
 #include <unordered_map>
-#include <fsatutils/errors.hpp>
-#include <fsatutils/log/log.hpp>
-#include <fsatutils/zmq/service.hpp>
-#include <fsatutils/zmq/zprotocol.hpp>
 #include <variant>
 
 namespace fsatutils {
@@ -318,6 +318,8 @@ std::vector<char> Service::impl::serializeServiceDescription() {
     }
 
     c["args"] = arg_array;
+
+    cmd_array.push_back(c);
   }
 
   j["commands"] = cmd_array;
