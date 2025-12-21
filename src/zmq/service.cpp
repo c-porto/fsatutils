@@ -51,7 +51,7 @@ class Service::impl {
  private:
   std::variant<std::monostate, Command, DiscoverMsgHeader> parseMessage(
       std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
-      std::span<const uint8_t> topic, int more, std::size_t more_size);
+      std::span<uint8_t> topic, int more, std::size_t more_size);
 
   bool runCommandHandler(Command cmd);
 
@@ -184,7 +184,7 @@ void Service::impl::workTask(std::stop_token stoken) {
 
 std::variant<std::monostate, Command, DiscoverMsgHeader>
 Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
-                            std::span<const uint8_t> topic, int more,
+                            std::span<uint8_t> topic, int more,
                             std::size_t more_size) {
   auto min_size = std::min(g_discoverTopic.size(), desc_.name.size());
 
@@ -211,6 +211,10 @@ Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
 
   /* If Topic isn't "disc" it must be the service's name, courtesy of ZMQ
    * filters */
+
+  std::string t{reinterpret_cast<char*>(topic.data()), topic.size()};
+
+  logs::log(DEBUG, "Received a command for service [%s]!\n", t.c_str());
 
   int res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
 
