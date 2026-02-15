@@ -191,11 +191,14 @@ bool Client::impl::recvAndLogResponses() {
 
         std::string_view payload{buf.data(), static_cast<std::size_t>(res)};
 
+        if (payload.empty()) continue;
+        if (payload.starts_with("disc")) continue;
+
         try {
           json j = json::parse(payload);
           std::cout << "Discovered: " << j.dump(1) << std::endl;
         } catch (const std::exception&) {
-          std::cout << "Discovered: " << payload << std::endl;
+          logs::log(ERR, "Failed to parse JSON string for discover message!");
         }
       }
     }
