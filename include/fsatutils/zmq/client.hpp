@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace fsatutils {
@@ -24,9 +25,10 @@ class Client {
   Client(std::string host);
   ~Client();
 
-  bool sendCommand(std::string_view service, Client::CommandRequest &req);
+  bool sendCommand(std::string_view service, Client::CommandRequest& req);
   bool sendDiscover();
   bool recvAndLogResponses();
+  bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
 
  private:
   class impl;

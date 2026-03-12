@@ -34,6 +34,8 @@ class Client::impl {
 
   bool recvAndLogResponses();
 
+  bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
+
  private:
   bool connectToEngineProxy();
   ZMQEngine engine_;
@@ -52,6 +54,11 @@ bool Client::sendCommand(std::string_view service,
 bool Client::sendDiscover() { return impl_->sendDiscover(); }
 
 bool Client::recvAndLogResponses() { return impl_->recvAndLogResponses(); }
+
+bool Client::publishRawBytes(std::string_view topic,
+                             std::span<std::uint8_t> data) {
+  return impl_->publishRawBytes(topic, data);
+}
 
 Client::impl::impl(std::string host) : host_{std::move(host)} {
   if (!connectToEngineProxy()) {
@@ -277,6 +284,23 @@ bool Client::impl::connectToEngineProxy() {
             "Connected to ZMQ Engine: pub(tx): [%u], sub(rx): [%u], rx "
             "filters: \"\", !\"disc\"\n",
             ZMQ_FLATSAT_ENGINE_XSUB_PORT, ZMQ_FLATSAT_ENGINE_XPUB_PORT);
+
+  return true;
+}
+
+bool Client::impl::publishRawBytes(std::string_view topic,
+                                   std::span<std::uint8_t> data) {
+  if (zmq_send(engine_.pub, topic.data(), topic.size(), ZMQ_SNDMORE) < 0) {
+    logs::log(ERR, "Failed to send topic! ZMQ error [%s]\n",
+              zmq_strerror(errno));
+    return false;
+  }
+
+  if (zmq_send(engine_.pub, data.data(), data.size(), 0) < 0) {
+    logs::log(ERR, "Failed to send data! ZMQ error [%s]\n",
+              zmq_strerror(errno));
+    return false;
+  }
 
   return true;
 }
