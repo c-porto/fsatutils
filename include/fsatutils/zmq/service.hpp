@@ -37,6 +37,9 @@ class Service {
   bool registerHandler(CommandType& command, CommandHandlerFn handler,
                        void* handlerData);
 
+  bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
+  bool subscribeTo(std::string_view topic);
+
  private:
   class impl;
   std::unique_ptr<impl> impl_;

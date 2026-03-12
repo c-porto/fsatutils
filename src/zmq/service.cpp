@@ -48,6 +48,10 @@ class Service::impl {
 
   void workTask(std::stop_token token);
 
+  bool subscribeTo(std::string_view topic);
+
+  bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
+
  private:
   std::variant<std::monostate, Command, DiscoverMsgHeader> parseMessage(
       std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
@@ -91,6 +95,15 @@ bool Service::registerHandler(CommandType& command,
   return impl_->registerHandler(command, handler, handlerData);
 }
 
+bool Service::subscribeTo(std::string_view topic) {
+  return impl_->subscribeTo(topic);
+}
+
+bool Service::publishRawBytes(std::string_view topic,
+                              std::span<std::uint8_t> data) {
+  return impl_->publishRawBytes(topic, data);
+}
+
 Service::impl::impl(ServiceDescription desc) : desc_{std::move(desc)} {
   if (!connectToEngineProxy()) {
     throw_runtime_error("Failed to connect to FlatSat2 ZMQ Engine!");
@@ -101,8 +114,9 @@ void Service::impl::runService() {
   std::ofstream ofs;
   pid_t pid = getpid();
 
-  ofs.open("/run/read-sensors/read-sensors.pid",
-           std::ios::out | std::ios::trunc);
+  std::string pid_path = "/run/" + desc_.name + "/" + desc_.name + ".pid";
+
+  ofs.open(pid_path.c_str(), std::ios::out | std::ios::trunc);
   ofs << pid;
   ofs.close();
 
@@ -435,6 +449,37 @@ bool Service::impl::registerHandler(CommandType& command,
   auto& reg = command_registry_[command];
 
   reg.handlers.push_back({handler, handlerData});
+
+  return true;
+}
+
+bool Service::impl::subscribeTo(std::string_view topic) {
+  std::string topic_name{topic};
+
+  if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, topic.data(), topic.size()) !=
+      0) {
+    logs::log(ERR, "Failed to subscribe to %s!\n", topic_name.c_str());
+    return false;
+  }
+
+  logs::log(INFO, "Subscribed to %s\n", topic_name.c_str());
+
+  return true;
+}
+
+bool Service::impl::publishRawBytes(std::string_view topic,
+                                    std::span<std::uint8_t> data) {
+  if (zmq_send(engine_.pub, topic.data(), topic.size(), ZMQ_SNDMORE) < 0) {
+    logs::log(ERR, "Failed to send topic! ZMQ error [%s]\n",
+              zmq_strerror(errno));
+    return false;
+  }
+
+  if (zmq_send(engine_.pub, data.data(), data.size(), 0) < 0) {
+    logs::log(ERR, "Failed to send data! ZMQ error [%s]\n",
+              zmq_strerror(errno));
+    return false;
+  }
 
   return true;
 }
