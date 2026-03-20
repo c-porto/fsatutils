@@ -103,7 +103,7 @@ ZMQEngine::ZMQEngine(std::string& host, std::size_t xpub, std::size_t xsub) {
   }
 
   logs::log(INFO,
-            "Connected to ZMQ Engine[%llu]: pub(tx): [%llu], sub(rx): [%s]\n",
+            "Connected to ZMQ Engine[%s]: pub(tx): [%llu], sub(rx): [%llu]\n",
             host.c_str(), xsub, xpub);
 }
 
