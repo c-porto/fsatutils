@@ -4,11 +4,11 @@
 #include <fsatutils/errors.hpp>
 #include <fsatutils/log/log.hpp>
 #include <fsatutils/zmq/client.hpp>
+#include <fsatutils/zmq/zmq_engine.hpp>
 #include <fsatutils/zmq/zprotocol.hpp>
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <thread>
 
 using json = nlohmann::json;
 
@@ -16,17 +16,9 @@ namespace fsatutils {
 
 namespace zmq {
 
-struct ZMQEngine {
-  void* ctx;
-  void* sub;
-  void* pub;
-};
-
 class Client::impl {
  public:
   impl(std::string host);
-
-  void cleanResources();
 
   bool sendCommand(std::string_view service, Client::CommandRequest& req);
 
@@ -37,14 +29,11 @@ class Client::impl {
   bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
 
  private:
-  bool connectToEngineProxy();
   ZMQEngine engine_;
   std::string host_;
 };
 
 Client::Client(std::string host) : impl_{std::make_unique<impl>(host)} {}
-
-Client::~Client() { impl_->cleanResources(); }
 
 bool Client::sendCommand(std::string_view service,
                          Client::CommandRequest& req) {
@@ -60,20 +49,17 @@ bool Client::publishRawBytes(std::string_view topic,
   return impl_->publishRawBytes(topic, data);
 }
 
-Client::impl::impl(std::string host) : host_{std::move(host)} {
-  if (!connectToEngineProxy()) {
-    throw_runtime_error("Failed to connect to FlatSat2 ZMQ Engine!");
+Client::impl::impl(std::string host)
+    : engine_{host, ZMQ_FLATSAT_ENGINE_XPUB_PORT, ZMQ_FLATSAT_ENGINE_XSUB_PORT},
+      host_{host} {
+  if (zmq_setsockopt(engine_.sub(), ZMQ_SUBSCRIBE, "", 0U) != 0) {
+    logs::log(ERR, "Failed to subscribe to every topic!\n");
+    throw_runtime_error("Failed to subscribe to every topic!");
   }
-}
-
-void Client::impl::cleanResources() {
-  zmq_ctx_shutdown(engine_.ctx);
-
-  zmq_close(engine_.pub);
-
-  zmq_close(engine_.sub);
-
-  zmq_ctx_destroy(engine_.ctx);
+  if (zmq_setsockopt(engine_.sub(), ZMQ_UNSUBSCRIBE, "disc", 4U) != 0) {
+    logs::log(ERR, "Failed to unsubscribe to discover topic!\n");
+    throw_runtime_error("Failed to unsubscribe to discover topic!");
+  }
 }
 
 bool Client::impl::sendCommand(std::string_view service,
@@ -99,7 +85,8 @@ bool Client::impl::sendCommand(std::string_view service,
 
   CommandMsgHeader header = {.version = 1, .proto = MessageProtocol::JSON};
 
-  if (zmq_send(engine_.pub, service.data(), service.size(), ZMQ_SNDMORE) < 0) {
+  if (zmq_send(engine_.pub(), service.data(), service.size(), ZMQ_SNDMORE) <
+      0) {
     logs::log(ERR, "Failed to send service name! ZMQ error [%s]\n",
               zmq_strerror(errno));
     return false;
@@ -108,13 +95,13 @@ bool Client::impl::sendCommand(std::string_view service,
   std::array<const std::uint8_t, 2> buf = {
       header.version, static_cast<std::uint8_t>(header.proto)};
 
-  if (zmq_send(engine_.pub, buf.data(), buf.size(), ZMQ_SNDMORE) < 0) {
+  if (zmq_send(engine_.pub(), buf.data(), buf.size(), ZMQ_SNDMORE) < 0) {
     logs::log(ERR, "Failed to send command header! ZMQ error [%s]\n",
               zmq_strerror(errno));
     return false;
   }
 
-  if (zmq_send(engine_.pub, payload.data(), payload.size(), 0) < 0) {
+  if (zmq_send(engine_.pub(), payload.data(), payload.size(), 0) < 0) {
     logs::log(ERR, "Failed to send JSON payload! ZMQ error [%s]\n",
               zmq_strerror(errno));
     return false;
@@ -126,7 +113,7 @@ bool Client::impl::sendCommand(std::string_view service,
 bool Client::impl::sendDiscover() {
   DiscoverMsgHeader header = {.version = 1};
 
-  if (zmq_send(engine_.pub, g_discoverTopic.data(), g_discoverTopic.size(),
+  if (zmq_send(engine_.pub(), g_discoverTopic.data(), g_discoverTopic.size(),
                ZMQ_SNDMORE) < 0) {
     logs::log(ERR, "Failed to send discover topic! ZMQ error [%s]\n",
               zmq_strerror(errno));
@@ -135,7 +122,7 @@ bool Client::impl::sendDiscover() {
 
   std::array<const std::uint8_t, 1> buf = {header.version};
 
-  if (zmq_send(engine_.pub, buf.data(), buf.size(), 0) < 0) {
+  if (zmq_send(engine_.pub(), buf.data(), buf.size(), 0) < 0) {
     logs::log(ERR, "Failed to send discover header! ZMQ error [%s]\n",
               zmq_strerror(errno));
     return false;
@@ -156,7 +143,7 @@ bool Client::impl::recvAndLogResponses() {
   const auto deadline = clock::now() + window;
 
   zmq_pollitem_t item = {
-      .socket = engine_.sub, .fd = 0, .events = ZMQ_POLLIN, .revents = 0};
+      .socket = engine_.sub(), .fd = 0, .events = ZMQ_POLLIN, .revents = 0};
 
   while (1) {
     auto now = clock::now();
@@ -182,11 +169,11 @@ bool Client::impl::recvAndLogResponses() {
         int events = 0;
         size_t size = sizeof(events);
 
-        zmq_getsockopt(engine_.sub, ZMQ_EVENTS, &events, &size);
+        zmq_getsockopt(engine_.sub(), ZMQ_EVENTS, &events, &size);
 
         if (!(events & ZMQ_POLLIN)) break;
 
-        int res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
+        int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
         if (res < 0) {
           logs::log(ERR, "Failed to receve message! ZMQ error [%s]",
@@ -212,97 +199,9 @@ bool Client::impl::recvAndLogResponses() {
   }
 }
 
-bool Client::impl::connectToEngineProxy() {
-  using namespace std::chrono_literals;
-
-  engine_.ctx = zmq_ctx_new();
-
-  if (engine_.ctx == nullptr) {
-    logs::log(ERR, "Failed to create zmq context!\n");
-    return false;
-  }
-
-  engine_.pub = zmq_socket(engine_.ctx, ZMQ_PUB);
-
-  if (engine_.pub == nullptr) {
-    logs::log(ERR, "Failed to create zmq publisher!\n");
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  engine_.sub = zmq_socket(engine_.ctx, ZMQ_SUB);
-
-  if (engine_.sub == nullptr) {
-    logs::log(ERR, "Failed to create zmq subscribe!\n");
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  const char* xsub = "tcp://0.0.0.0:2808";
-
-  if (zmq_connect(engine_.pub, xsub) != 0) {
-    logs::log(ERR, "Failed to connect to engine xsub!\n");
-    zmq_close(engine_.pub);
-    zmq_close(engine_.sub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  /* Make sure subscribers can be registered */
-  std::this_thread::sleep_for(100ms);
-
-  const char* xpub = "tcp://0.0.0.0:2809";
-
-  if (zmq_connect(engine_.sub, xpub) != 0) {
-    logs::log(ERR, "Failed to connect to engine xpub!\n");
-    zmq_close(engine_.pub);
-    zmq_close(engine_.sub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  /* Subscribe to everything */
-  if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, "", 0U) != 0) {
-    logs::log(ERR, "Failed to subscribe to every message!\n");
-    zmq_close(engine_.sub);
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  /* Unsubscribe to everything */
-  if (zmq_setsockopt(engine_.sub, ZMQ_UNSUBSCRIBE, "disc", 4U) != 0) {
-    logs::log(ERR, "Failed to unsubscribe to discover message!\n");
-    zmq_close(engine_.sub);
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  logs::log(DEBUG,
-            "Connected to ZMQ Engine: pub(tx): [%u], sub(rx): [%u], rx "
-            "filters: \"\", !\"disc\"\n",
-            ZMQ_FLATSAT_ENGINE_XSUB_PORT, ZMQ_FLATSAT_ENGINE_XPUB_PORT);
-
-  return true;
-}
-
 bool Client::impl::publishRawBytes(std::string_view topic,
                                    std::span<std::uint8_t> data) {
-  if (zmq_send(engine_.pub, topic.data(), topic.size(), ZMQ_SNDMORE) < 0) {
-    logs::log(ERR, "Failed to send topic! ZMQ error [%s]\n",
-              zmq_strerror(errno));
-    return false;
-  }
-
-  if (zmq_send(engine_.pub, data.data(), data.size(), 0) < 0) {
-    logs::log(ERR, "Failed to send data! ZMQ error [%s]\n",
-              zmq_strerror(errno));
-    return false;
-  }
-
-  return true;
+  return (engine_.publish_raw_bytes(topic, data) == 0) ? true : false;
 }
 
 }  // namespace zmq
