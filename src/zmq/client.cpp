@@ -9,6 +9,7 @@
 #include <iostream>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <thread>
 
 using json = nlohmann::json;
 
@@ -54,6 +55,12 @@ bool Client::publishRawBytes(std::string_view topic,
 Client::impl::impl(std::string host)
     : engine_{host, ZMQ_FLATSAT_ENGINE_XPUB_PORT, ZMQ_FLATSAT_ENGINE_XSUB_PORT},
       host_{host} {
+
+  using namespace std::chrono_literals;
+
+  /* Make sure subscribers can be registered */
+  std::this_thread::sleep_for(100ms);
+
   if (zmq_setsockopt(engine_.sub(), ZMQ_SUBSCRIBE, "", 0U) != 0) {
     logs::log(ERR, "Failed to subscribe to every topic!\n");
     throw_runtime_error("Failed to subscribe to every topic!");
