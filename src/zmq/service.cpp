@@ -6,6 +6,7 @@
 #include <fsatutils/errors.hpp>
 #include <fsatutils/log/log.hpp>
 #include <fsatutils/zmq/service.hpp>
+#include <fsatutils/zmq/zmq_engine.hpp>
 #include <fsatutils/zmq/zprotocol.hpp>
 #include <fstream>
 #include <optional>
@@ -18,12 +19,6 @@
 namespace fsatutils {
 
 namespace zmq {
-
-struct ZMQEngine {
-  void* ctx;
-  void* sub;
-  void* pub;
-};
 
 class Service::impl {
   struct RegistryData {
@@ -53,9 +48,9 @@ class Service::impl {
   bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
 
  private:
-  std::variant<std::monostate, Command, DiscoverMsgHeader> parseMessage(
-      std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
-      std::span<uint8_t> topic, int more, std::size_t more_size);
+  std::variant<std::monostate, Command, DiscoverMsgHeader, std::string>
+  parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
+               std::span<uint8_t> topic, int more, std::size_t more_size);
 
   bool runCommandHandler(Command cmd);
 
@@ -132,17 +127,7 @@ void Service::impl::stopService() {
   }
 }
 
-void Service::impl::cleanResources() {
-  zmq_ctx_shutdown(engine_.ctx);
-
-  zmq_close(engine_.sub);
-
-  zmq_close(engine_.pub);
-
-  zmq_ctx_destroy(engine_.ctx);
-
-  stopService();
-}
+void Service::impl::cleanResources() { stopService(); }
 
 void Service::impl::workTask(std::stop_token stoken) {
   while (!stoken.stop_requested()) {
@@ -150,14 +135,14 @@ void Service::impl::workTask(std::stop_token stoken) {
     int more = 0;
     std::size_t more_size = sizeof(more);
 
-    int res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
+    int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
     if (res < 0) {
       logs::log(ERR, "Error recv data [%s]\n", zmq_strerror(zmq_errno()));
       continue;
     }
 
-    zmq_getsockopt(engine_.sub, ZMQ_RCVMORE, &more, &more_size);
+    zmq_getsockopt(engine_.sub(), ZMQ_RCVMORE, &more, &more_size);
 
     if (!more) {
       logs::log(ERR, "Message is not multipart!\n");
@@ -166,8 +151,7 @@ void Service::impl::workTask(std::stop_token stoken) {
 
     std::span<uint8_t> m{buf.data(), static_cast<std::size_t>(res)};
 
-    std::variant<std::monostate, Command, DiscoverMsgHeader> request =
-        parseMessage(buf, m, more, more_size);
+    auto request = parseMessage(buf, m, more, more_size);
 
     if (std::holds_alternative<std::monostate>(request)) {
       logs::log(ERR, "Failed to parse message!");
@@ -179,7 +163,7 @@ void Service::impl::workTask(std::stop_token stoken) {
 
       auto res = serializeServiceDescription();
 
-      if (zmq_send(engine_.pub, res.data(), res.size(), 0U) < 0) {
+      if (zmq_send(engine_.pub(), res.data(), res.size(), 0U) < 0) {
         logs::log(
             ERR,
             "Failed to send service data as response to discover request!");
@@ -196,7 +180,7 @@ void Service::impl::workTask(std::stop_token stoken) {
   }
 }
 
-std::variant<std::monostate, Command, DiscoverMsgHeader>
+std::variant<std::monostate, Command, DiscoverMsgHeader, std::string>
 Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
                             std::span<uint8_t> topic, int more,
                             std::size_t more_size) {
@@ -211,7 +195,7 @@ Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
     /* Check the subscribed topic of the message */
 
     if (std::equal(topic.begin(), topic.end(), g_discoverTopic.begin())) {
-      int res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
+      int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
       if (res < 0) {
         logs::log(ERR, "Error recv discover header [%s]\n",
@@ -223,14 +207,16 @@ Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
     }
   }
 
-  /* If Topic isn't "disc" it must be the service's name, courtesy of ZMQ
-   * filters */
-
   std::string t{reinterpret_cast<char*>(topic.data()), topic.size()};
+
+  /* Check if the subscribed topic of the message is the service name */
+  if (!std::equal(topic.begin(), topic.end(), desc_.name.begin())) {
+    return t;
+  }
 
   logs::log(DEBUG, "Received a command for service [%s]!\n", t.c_str());
 
-  int res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
+  int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
   if (res < 0) {
     logs::log(ERR, "Error recv command header [%s]\n",
@@ -248,14 +234,14 @@ Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
       .proto = static_cast<MessageProtocol>(raw_header[1]),
   };
 
-  zmq_getsockopt(engine_.sub, ZMQ_RCVMORE, &more, &more_size);
+  zmq_getsockopt(engine_.sub(), ZMQ_RCVMORE, &more, &more_size);
 
   if (!more) {
     logs::log(ERR, "Payload is missing on multipart message!\n");
     return std::monostate{};
   }
 
-  res = zmq_recv(engine_.sub, buf.data(), buf.size(), 0);
+  res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
   if (res < 0) {
     logs::log(ERR, "Error recv command payload [%s]\n",
@@ -344,75 +330,7 @@ std::vector<char> Service::impl::serializeServiceDescription() {
 }
 
 bool Service::impl::connectToEngineProxy() {
-  engine_.ctx = zmq_ctx_new();
-
-  if (engine_.ctx == nullptr) {
-    logs::log(ERR, "Failed to create zmq context!\n");
-    return false;
-  }
-
-  engine_.pub = zmq_socket(engine_.ctx, ZMQ_PUB);
-
-  if (engine_.pub == nullptr) {
-    logs::log(ERR, "Failed to create zmq publisher!\n");
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  engine_.sub = zmq_socket(engine_.ctx, ZMQ_SUB);
-
-  if (engine_.sub == nullptr) {
-    logs::log(ERR, "Failed to create zmq subscribe!\n");
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  const char* xsub = "tcp://0.0.0.0:2808";
-
-  if (zmq_connect(engine_.pub, xsub) != 0) {
-    logs::log(ERR, "Failed to connect to engine xsub!\n");
-    zmq_close(engine_.pub);
-    zmq_close(engine_.sub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  const char* xpub = "tcp://0.0.0.0:2809";
-
-  if (zmq_connect(engine_.sub, xpub) != 0) {
-    logs::log(ERR, "Failed to connect to engine xpub!\n");
-    zmq_close(engine_.pub);
-    zmq_close(engine_.sub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, desc_.name.c_str(),
-                     desc_.name.size()) != 0) {
-    logs::log(ERR, "Failed to subscribe to service name!\n");
-    zmq_close(engine_.sub);
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, g_discoverTopic.data(), 4U) !=
-      0) {
-    logs::log(ERR, "Failed to subscribe to discover command!\n");
-    zmq_close(engine_.sub);
-    zmq_close(engine_.pub);
-    zmq_ctx_destroy(engine_.ctx);
-    return false;
-  }
-
-  logs::log(INFO,
-            "Connected to ZMQ Engine: pub(tx): [%u], sub(rx): [%u], rx "
-            "filters: %s; %s\n",
-            ZMQ_FLATSAT_ENGINE_XSUB_PORT, ZMQ_FLATSAT_ENGINE_XPUB_PORT,
-            desc_.name.c_str(), g_discoverTopic.data());
-
-  return true;
+  return (engine_.configure_zprotocol(desc_.name) == 0) ? true : false;
 }
 
 bool Service::impl::registerCommand(CommandType command,
@@ -454,34 +372,12 @@ bool Service::impl::registerHandler(CommandType& command,
 }
 
 bool Service::impl::subscribeTo(std::string_view topic) {
-  std::string topic_name{topic};
-
-  if (zmq_setsockopt(engine_.sub, ZMQ_SUBSCRIBE, topic.data(), topic.size()) !=
-      0) {
-    logs::log(ERR, "Failed to subscribe to %s!\n", topic_name.c_str());
-    return false;
-  }
-
-  logs::log(INFO, "Subscribed to %s\n", topic_name.c_str());
-
-  return true;
+  return (engine_.subscribe_to(topic) == 0) ? true : false;
 }
 
 bool Service::impl::publishRawBytes(std::string_view topic,
                                     std::span<std::uint8_t> data) {
-  if (zmq_send(engine_.pub, topic.data(), topic.size(), ZMQ_SNDMORE) < 0) {
-    logs::log(ERR, "Failed to send topic! ZMQ error [%s]\n",
-              zmq_strerror(errno));
-    return false;
-  }
-
-  if (zmq_send(engine_.pub, data.data(), data.size(), 0) < 0) {
-    logs::log(ERR, "Failed to send data! ZMQ error [%s]\n",
-              zmq_strerror(errno));
-    return false;
-  }
-
-  return true;
+  return (engine_.publish_raw_bytes(topic, data) == 0) ? true : false;
 }
 
 }  // namespace zmq

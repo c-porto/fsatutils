@@ -1,7 +1,7 @@
 project(
   'fsatutils',
   'cpp',
-  version: '0.3',
+  version: '0.4',
   default_options: [
     'warning_level=3',
     'cpp_std=c++20',
