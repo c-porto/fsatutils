@@ -35,6 +35,8 @@ class Client::impl {
 
 Client::Client(std::string host) : impl_{std::make_unique<impl>(host)} {}
 
+Client::~Client() = default;
+
 bool Client::sendCommand(std::string_view service,
                          Client::CommandRequest& req) {
   return impl_->sendCommand(service, req);

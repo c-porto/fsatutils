@@ -2,7 +2,6 @@
 #define CLIENT_HPP_
 
 #include <memory>
-#include <optional>
 #include <span>
 #include <vector>
 
