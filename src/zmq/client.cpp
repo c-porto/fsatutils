@@ -55,19 +55,14 @@ bool Client::publishRawBytes(std::string_view topic,
 Client::impl::impl(std::string host)
     : engine_{host, ZMQ_FLATSAT_ENGINE_XPUB_PORT, ZMQ_FLATSAT_ENGINE_XSUB_PORT},
       host_{host} {
-
   using namespace std::chrono_literals;
 
   /* Make sure subscribers can be registered */
   std::this_thread::sleep_for(100ms);
 
-  if (zmq_setsockopt(engine_.sub(), ZMQ_SUBSCRIBE, "", 0U) != 0) {
-    logs::log(ERR, "Failed to subscribe to every topic!\n");
-    throw_runtime_error("Failed to subscribe to every topic!");
-  }
-  if (zmq_setsockopt(engine_.sub(), ZMQ_UNSUBSCRIBE, "disc", 4U) != 0) {
-    logs::log(ERR, "Failed to unsubscribe to discover topic!\n");
-    throw_runtime_error("Failed to unsubscribe to discover topic!");
+  if (zmq_setsockopt(engine_.sub(), ZMQ_SUBSCRIBE, "beacon", 6U) != 0) {
+    logs::log(ERR, "Failed to subscribe to \"beacon\" topic!\n");
+    throw_runtime_error("Failed to subscribe to \"beacon\" topic!");
   }
 }
 
@@ -177,6 +172,8 @@ bool Client::impl::recvAndLogResponses() {
       while (1) {
         int events = 0;
         size_t size = sizeof(events);
+        int more = 0;
+        std::size_t more_size = sizeof(more);
 
         zmq_getsockopt(engine_.sub(), ZMQ_EVENTS, &events, &size);
 
@@ -190,12 +187,31 @@ bool Client::impl::recvAndLogResponses() {
           return false;
         }
 
+        zmq_getsockopt(engine_.sub(), ZMQ_RCVMORE, &more, &more_size);
+
+        if (!more) {
+          logs::log(ERR, "Message is not multipart!\n");
+          continue;
+        }
+
+        const char* topic = "beacon";
+
+        if (std::memcmp(topic, buf.data(), 6U) != 0) {
+          logs::log(ERR, "Message is not a response to a discover call!\n");
+          return false;
+        }
+
+        res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
+
+        if (res < 0) {
+          logs::log(ERR, "Failed to receve message! ZMQ error [%s]",
+                    zmq_strerror(errno));
+          return false;
+        }
+
         received_any = true;
 
         std::string_view payload{buf.data(), static_cast<std::size_t>(res)};
-
-        if (payload.empty()) continue;
-        if (payload.starts_with("disc")) continue;
 
         try {
           json j = json::parse(payload);

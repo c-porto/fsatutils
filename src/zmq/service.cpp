@@ -163,6 +163,12 @@ void Service::impl::workTask(std::stop_token stoken) {
 
       auto res = serializeServiceDescription();
 
+      if (zmq_send(engine_.pub(), "beacon", 6U, ZMQ_SNDMORE) < 0) {
+        logs::log(
+            ERR,
+            "Failed to send beacon topic as response to discover request!");
+      }
+
       if (zmq_send(engine_.pub(), res.data(), res.size(), 0U) < 0) {
         logs::log(
             ERR,
