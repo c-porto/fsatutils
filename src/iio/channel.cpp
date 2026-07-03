@@ -1,10 +1,10 @@
 #include <iio.h>
 
 #include <array>
-#include <string>
 #include <fsatutils/errors.hpp>
 #include <fsatutils/iio/channel.hpp>
 #include <fsatutils/log/log.hpp>
+#include <string>
 
 namespace fsatutils {
 
@@ -31,6 +31,14 @@ void Channel::write_attr(std::string const& attr, long long const& value) {
 template <>
 void Channel::write_attr(std::string const& attr, bool const& value) {
   int res = iio_channel_attr_write_bool(raw_, attr.c_str(), value);
+  if (res < 0) {
+    throw_runtime_error("Failed to write " + attr + " Channel attribute!");
+  }
+}
+
+template <>
+void Channel::write_attr(std::string const& attr, double const& value) {
+  int res = iio_channel_attr_write_double(raw_, attr.c_str(), value);
   if (res < 0) {
     throw_runtime_error("Failed to write " + attr + " Channel attribute!");
   }
