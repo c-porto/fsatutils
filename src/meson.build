@@ -1,4 +1,5 @@
 subdir('cli')
 subdir('iio')
+subdir('parameter')
 subdir('zmq')
 subdir('log')

@@ -29,6 +29,14 @@ class Client::impl {
 
   bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
 
+  bool subscribeParameter(std::string_view service, std::string_view name);
+  bool unsubscribeParameter(std::string_view service, std::string_view name);
+  bool requestParameter(std::string_view service, std::string_view name);
+  bool setParameter(std::string_view service, std::string_view name,
+                    ParameterSystem::Value const& value);
+  std::optional<ParameterUpdate> receiveParameter(
+      std::chrono::milliseconds timeout);
+
  private:
   ZMQEngine engine_;
   std::string host_;
@@ -50,6 +58,30 @@ bool Client::recvAndLogResponses() { return impl_->recvAndLogResponses(); }
 bool Client::publishRawBytes(std::string_view topic,
                              std::span<std::uint8_t> data) {
   return impl_->publishRawBytes(topic, data);
+}
+
+bool Client::subscribeParameter(std::string_view service,
+                                std::string_view name) {
+  return impl_->subscribeParameter(service, name);
+}
+
+bool Client::unsubscribeParameter(std::string_view service,
+                                  std::string_view name) {
+  return impl_->unsubscribeParameter(service, name);
+}
+
+bool Client::requestParameter(std::string_view service, std::string_view name) {
+  return impl_->requestParameter(service, name);
+}
+
+bool Client::setParameter(std::string_view service, std::string_view name,
+                          ParameterSystem::Value const& value) {
+  return impl_->setParameter(service, name, value);
+}
+
+std::optional<ParameterUpdate> Client::receiveParameter(
+    std::chrono::milliseconds timeout) {
+  return impl_->receiveParameter(timeout);
 }
 
 Client::impl::impl(std::string host)
@@ -227,6 +259,61 @@ bool Client::impl::recvAndLogResponses() {
 bool Client::impl::publishRawBytes(std::string_view topic,
                                    std::span<std::uint8_t> data) {
   return (engine_.publish_raw_bytes(topic, data) == 0) ? true : false;
+}
+
+bool Client::impl::subscribeParameter(std::string_view service,
+                                      std::string_view name) {
+  auto topic = parameterTopic(service, name);
+  return engine_.subscribe_to(topic) == 0;
+}
+
+bool Client::impl::unsubscribeParameter(std::string_view service,
+                                        std::string_view name) {
+  auto topic = parameterTopic(service, name);
+  return engine_.unsubscribe(topic) == 0;
+}
+
+bool Client::impl::requestParameter(std::string_view service,
+                                    std::string_view name) {
+  auto topic = parameterControlTopic(service, name);
+  auto payload = serializeParameterControl(ParameterOperation::GET);
+  return publishRawBytes(topic, payload);
+}
+
+bool Client::impl::setParameter(std::string_view service, std::string_view name,
+                                ParameterSystem::Value const& value) {
+  auto topic = parameterControlTopic(service, name);
+  auto payload = serializeParameterControl(ParameterOperation::SET, value);
+  return publishRawBytes(topic, payload);
+}
+
+std::optional<ParameterUpdate> Client::impl::receiveParameter(
+    std::chrono::milliseconds timeout) {
+  std::array<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buffer;
+
+  zmq_pollitem_t item = {
+      .socket = engine_.sub(), .fd = 0, .events = ZMQ_POLLIN, .revents = 0};
+
+  int poll_result = zmq_poll(&item, 1, timeout.count());
+  if (poll_result <= 0 || !(item.revents & ZMQ_POLLIN)) return std::nullopt;
+
+  int result = zmq_recv(engine_.sub(), buffer.data(), buffer.size(), 0);
+  if (result < 0) return std::nullopt;
+
+  std::string topic{reinterpret_cast<char*>(buffer.data()),
+                    static_cast<std::size_t>(result)};
+
+  int more = 0;
+  std::size_t more_size = sizeof(more);
+  zmq_getsockopt(engine_.sub(), ZMQ_RCVMORE, &more, &more_size);
+  if (!more) return std::nullopt;
+
+  result = zmq_recv(engine_.sub(), buffer.data(), buffer.size(), 0);
+  if (result < 0) return std::nullopt;
+
+  std::span<const std::uint8_t> payload{buffer.data(),
+                                        static_cast<std::size_t>(result)};
+  return parseParameterUpdate(topic, payload);
 }
 
 }  // namespace zmq

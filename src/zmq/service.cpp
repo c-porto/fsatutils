@@ -5,6 +5,8 @@
 #include <cstring>
 #include <fsatutils/errors.hpp>
 #include <fsatutils/log/log.hpp>
+#include <fsatutils/parameter/parameter.hpp>
+#include <fsatutils/zmq/parameter_protocol.hpp>
 #include <fsatutils/zmq/service.hpp>
 #include <fsatutils/zmq/zmq_engine.hpp>
 #include <fsatutils/zmq/zprotocol.hpp>
@@ -47,12 +49,17 @@ class Service::impl {
 
   bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
 
+  bool exposeParameters(ParameterSystem& parameters);
+  bool publishParameter(std::string_view name);
+
  private:
-  std::variant<std::monostate, Command, DiscoverMsgHeader, std::string>
+  std::variant<std::monostate, Command, DiscoverMsgHeader, ParameterControl,
+               std::string>
   parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
                std::span<uint8_t> topic, int more, std::size_t more_size);
 
   bool runCommandHandler(Command cmd);
+  bool runParameterControl(ParameterControl const& control);
 
   std::vector<char> serializeServiceDescription();
 
@@ -62,6 +69,7 @@ class Service::impl {
   ZMQEngine engine_;
   std::unordered_map<CommandType, RegistryData> command_registry_;
   std::jthread work_thread_;
+  ParameterSystem* parameters_ = nullptr;
 };
 
 Service::Service(ServiceDescription desc)
@@ -99,6 +107,14 @@ bool Service::publishRawBytes(std::string_view topic,
   return impl_->publishRawBytes(topic, data);
 }
 
+bool Service::exposeParameters(ParameterSystem& parameters) {
+  return impl_->exposeParameters(parameters);
+}
+
+bool Service::publishParameter(std::string_view name) {
+  return impl_->publishParameter(name);
+}
+
 Service::impl::impl(ServiceDescription desc) : desc_{std::move(desc)} {
   if (!connectToEngineProxy()) {
     throw_runtime_error("Failed to connect to FlatSat2 ZMQ Engine!");
@@ -130,10 +146,29 @@ void Service::impl::stopService() {
 void Service::impl::cleanResources() { stopService(); }
 
 void Service::impl::workTask(std::stop_token stoken) {
+  if (parameters_ != nullptr) {
+    for (auto const& parameter : parameters_->describe()) {
+      publishParameter(parameter.name);
+    }
+  }
+
   while (!stoken.stop_requested()) {
     std::array<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf;
     int more = 0;
     std::size_t more_size = sizeof(more);
+
+    zmq_pollitem_t item = {
+        .socket = engine_.sub(), .fd = 0, .events = ZMQ_POLLIN, .revents = 0};
+
+    int poll_result = zmq_poll(&item, 1, 100);
+
+    if (poll_result < 0) {
+      logs::log(ERR, "Error polling service socket [%s]\n",
+                zmq_strerror(zmq_errno()));
+      continue;
+    }
+
+    if (poll_result == 0 || !(item.revents & ZMQ_POLLIN)) continue;
 
     int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
@@ -183,44 +218,78 @@ void Service::impl::workTask(std::stop_token stoken) {
         logs::log(ERR, "Failed to run command handler!");
       }
     }
+
+    if (std::holds_alternative<ParameterControl>(request)) {
+      auto const& control = std::get<ParameterControl>(request);
+
+      if (!runParameterControl(control)) {
+        logs::log(ERR, "Failed to process parameter [%s]!\n",
+                  control.name.c_str());
+      }
+    }
   }
 }
 
-std::variant<std::monostate, Command, DiscoverMsgHeader, std::string>
+std::variant<std::monostate, Command, DiscoverMsgHeader, ParameterControl,
+             std::string>
 Service::impl::parseMessage(std::span<std::uint8_t, ZMQ_FLATSAT_ENGINE_MTU> buf,
                             std::span<uint8_t> topic, int more,
                             std::size_t more_size) {
-  auto min_size = std::min(g_discoverTopic.size(), desc_.name.size());
+  std::string topic_name{reinterpret_cast<char*>(topic.data()), topic.size()};
 
-  if (topic.size() < min_size) {
-    logs::log(ERR, "Message was too short to be parsed!");
-    return std::monostate{};
+  if (topic_name == g_discoverTopic) {
+    int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
+
+    if (res < 0) {
+      logs::log(ERR, "Error recv discover header [%s]\n",
+                zmq_strerror(zmq_errno()));
+      return std::monostate{};
+    }
+
+    return DiscoverMsgHeader{.version = buf[0]};
   }
 
-  if (topic.size() == g_discoverTopic.size()) {
-    /* Check the subscribed topic of the message */
+  auto parameter_control_prefix = desc_.name + "/param-control/";
 
-    if (std::equal(topic.begin(), topic.end(), g_discoverTopic.begin())) {
+  if (topic_name.starts_with(parameter_control_prefix)) {
+    int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
+
+    if (res < 0) {
+      logs::log(ERR, "Error recv parameter control payload [%s]\n",
+                zmq_strerror(zmq_errno()));
+      return std::monostate{};
+    }
+
+    std::span<const std::uint8_t> payload{buf.data(),
+                                          static_cast<std::size_t>(res)};
+    auto control = parseParameterControl(topic_name, payload);
+
+    if (!control.has_value()) {
+      logs::log(ERR, "Failed to parse parameter control message!\n");
+      return std::monostate{};
+    }
+
+    return std::move(*control);
+  }
+
+  if (topic_name != desc_.name) {
+    while (more) {
       int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
       if (res < 0) {
-        logs::log(ERR, "Error recv discover header [%s]\n",
+        logs::log(ERR, "Error draining message payload [%s]\n",
                   zmq_strerror(zmq_errno()));
         return std::monostate{};
       }
 
-      return DiscoverMsgHeader{.version = buf[0]};
+      zmq_getsockopt(engine_.sub(), ZMQ_RCVMORE, &more, &more_size);
     }
+
+    return topic_name;
   }
 
-  std::string t{reinterpret_cast<char*>(topic.data()), topic.size()};
-
-  /* Check if the subscribed topic of the message is the service name */
-  if (!std::equal(topic.begin(), topic.end(), desc_.name.begin())) {
-    return t;
-  }
-
-  logs::log(DEBUG, "Received a command for service [%s]!\n", t.c_str());
+  logs::log(DEBUG, "Received a command for service [%s]!\n",
+            topic_name.c_str());
 
   int res = zmq_recv(engine_.sub(), buf.data(), buf.size(), 0);
 
@@ -295,6 +364,22 @@ bool Service::impl::runCommandHandler(Command cmd) {
   return true;
 }
 
+bool Service::impl::runParameterControl(ParameterControl const& control) {
+  if (parameters_ == nullptr || control.service != desc_.name ||
+      !parameters_->contains(control.name)) {
+    return false;
+  }
+
+  if (control.operation == ParameterOperation::SET) {
+    if (!parameters_->isWritable(control.name) || !control.value.has_value() ||
+        !parameters_->write(control.name, *control.value)) {
+      return false;
+    }
+  }
+
+  return publishParameter(control.name);
+}
+
 std::vector<char> Service::impl::serializeServiceDescription() {
   using json = nlohmann::json;
 
@@ -329,6 +414,20 @@ std::vector<char> Service::impl::serializeServiceDescription() {
   }
 
   j["commands"] = cmd_array;
+
+  json parameter_array = json::array();
+
+  if (parameters_ != nullptr) {
+    for (auto const& parameter : parameters_->describe()) {
+      json p;
+      p["name"] = parameter.name;
+      p["type"] = parameterTypeToString(parameter.type);
+      p["writable"] = parameter.writable;
+      parameter_array.push_back(p);
+    }
+  }
+
+  j["parameters"] = parameter_array;
 
   std::string json_str = j.dump();
 
@@ -384,6 +483,25 @@ bool Service::impl::subscribeTo(std::string_view topic) {
 bool Service::impl::publishRawBytes(std::string_view topic,
                                     std::span<std::uint8_t> data) {
   return (engine_.publish_raw_bytes(topic, data) == 0) ? true : false;
+}
+
+bool Service::impl::exposeParameters(ParameterSystem& parameters) {
+  if (parameters_ != nullptr || work_thread_.joinable()) return false;
+
+  parameters_ = &parameters;
+  return true;
+}
+
+bool Service::impl::publishParameter(std::string_view name) {
+  if (parameters_ == nullptr) return false;
+
+  auto value = parameters_->read(name);
+  if (!value.has_value()) return false;
+
+  auto topic = parameterTopic(desc_.name, name);
+  auto payload = serializeParameterValue(*value);
+
+  return publishRawBytes(topic, payload);
 }
 
 }  // namespace zmq

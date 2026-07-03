@@ -1,6 +1,7 @@
 #ifndef SERVICE_HPP_
 #define SERVICE_HPP_
 
+#include <fsatutils/parameter/parameter.hpp>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -39,6 +40,9 @@ class Service {
 
   bool publishRawBytes(std::string_view topic, std::span<std::uint8_t> data);
   bool subscribeTo(std::string_view topic);
+
+  bool exposeParameters(ParameterSystem& parameters);
+  bool publishParameter(std::string_view name);
 
  private:
   class impl;
